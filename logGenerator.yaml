@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploys 4 AWS Lambda functions with Step Function to run them in parallel and AWS EventBridge Scheduler
+
+Parameters:
+  S3BucketSourceCode:
+    Type: String
+    Description: S3 bucket where the Lambda code is stored
+
+  S3BucketLogPath:
+    Type: String
+    Description: S3 bucket where the logs will be stored
+
+  NUMRECORDS:
+    Type: Number
+    Description: Enter number of Records you want (1 > N < 10000)
+    Default: 1000
+    MinValue: 1  # Minimum value is 1
+    MaxValue: 10000  # Maximum value is 10000
+
+  ScheduleRate:
+    Type: String
+    Default: "rate(1 minute)"
+    Description: Rate at which to run the Step Function (e.g., "rate(1 minute)" or "rate(5 minutes)")
+  
+Resources:
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaBasicExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - s3-object-lambda:WriteGetObjectResponse
+                  - s3-object-lambda:*
+                  - s3:*
+                Resource: "*"
+
+
+  WafLogGeneratorFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-wafLogGenerator1"
+      Handler: helloworld.App::handleRequest
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3BucketSourceCode
+        S3Key: waf-log-generator.zip
+      Runtime: java17
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          RECORDS: !Ref NUMRECORDS
+          S3_BUCKET_NAME: !Ref S3BucketLogPath
+
+  VPCLogGeneratorFunction:    
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-vpcLogGenerator1"
+      Handler: helloworld.App::handleRequest
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3BucketSourceCode
+        S3Key: vpc-flow-log-generator.zip
+      Runtime: java17
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          RECORDS: !Ref NUMRECORDS
+          S3_BUCKET_NAME: !Ref S3BucketLogPath
+
+  ApplicationLogGeneratorFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-applicationLogGenerator1"
+      Handler: helloworld.App::handleRequest
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3BucketSourceCode
+        S3Key: application-log-generator.zip
+      Runtime: java17
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          RECORDS: !Ref NUMRECORDS
+          S3_BUCKET_NAME: !Ref S3BucketLogPath
+
+  CloudTrailLogGeneratorFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-cloudtrailLogGenerator1"
+      Handler: helloworld.App::handleRequest
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3BucketSourceCode
+        S3Key: cloudtrail-log-generator.zip
+      Runtime: java17
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          RECORDS: !Ref NUMRECORDS
+          S3_BUCKET_NAME: !Ref S3BucketLogPath
+
+  StepFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-StepFunctionRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - s3:*
+                  - s3-object-lambda:*
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - s3-object-lambda:WriteGetObjectResponse
+                Resource: '*'
+
+  ParallelStepFunction:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-ParallelExecution"
+      RoleArn: !GetAtt StepFunctionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "A Parallel State Machine to run Lambda functions",
+          "StartAt": "ParallelExecution",
+          "States": {
+            "ParallelExecution": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "WafLogGenerator",
+                  "States": {
+                    "WafLogGenerator": {
+                      "Type": "Task",
+                      "Resource": "${WafLogGeneratorFunction.Arn}",
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "VPCLogGenerator",
+                  "States": {
+                    "VPCLogGenerator": {
+                      "Type": "Task",
+                      "Resource": "${VPCLogGeneratorFunction.Arn}",
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "ApplicationLogGenerator",
+                  "States": {
+                    "ApplicationLogGenerator": {
+                      "Type": "Task",
+                      "Resource": "${ApplicationLogGeneratorFunction.Arn}",
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "CloudTrailLogGenerator",
+                  "States": {
+                    "CloudTrailLogGenerator": {
+                      "Type": "Task",
+                      "Resource": "${CloudTrailLogGeneratorFunction.Arn}",
+                      "End": true
+                    }
+                  }
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+
+  EventBridgeRule:
+      Type: 'AWS::Events::Rule'
+      Properties:
+        Name: !Sub "${AWS::StackName}-ScheduleRule"
+        ScheduleExpression: !Ref ScheduleRate
+        State: "ENABLED"
+        Targets:
+          - Arn: !GetAtt ParallelStepFunction.Arn
+            Id: "StepFunctionTarget"
+            RoleArn: !GetAtt EventBridgeRole.Arn
+            Input: "{}"
+
+  EventBridgeRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        RoleName: !Sub "${AWS::StackName}-EventBridgeRole"
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: EventBridgeInvokeStepFunctionPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - states:StartExecution
+                    - lambda:InvokeFunction
+                    - s3:*
+                    - s3-object-lambda:*
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                    - s3-object-lambda:WriteGetObjectResponse
+                  Resource: !GetAtt ParallelStepFunction.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda Function
+    Value: !GetAtt WafLogGeneratorFunction.Arn
+
+  StepFunctionArn:
+    Description: ARN of the Step Function
+    Value: !Ref ParallelStepFunction
